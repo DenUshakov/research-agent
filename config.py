@@ -8,6 +8,6 @@ class Settings(BaseSettings):
     model_name: str = "gemini-3.6-flash"
     max_iterations: int = 10
     max_tool_result_chars: int = 8000  # обрізання результатів tools
-
+    output_dir: str = "output"
 
 settings = Settings()

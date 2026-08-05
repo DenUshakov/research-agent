@@ -1,0 +1,33 @@
+Research Agent (власний ReAct loop). Введи питання (або 'exit' для виходу).
+
+You: Порівняй Docker Swarm, Kubernetes та Nomad для оркестрації контейнерів
+
+🔧 Tool call: web_search({'query': 'Docker Swarm vs Kubernetes vs Nomad comparison 2023 2024'})
+📎 Result: [{"title": "Nomad vs Kubernetes: Our 2024 Hard Data on... — slipjar.app", "url": "https://slipjar.app/en/blog/nomad-vs-kubernetes-our-2024-hard-data-on-orchestration/", "snippet": "We deployed Nomad a...
+
+🔧 Tool call: web_search({'query': 'HashiCorp Nomad architecture task drivers license BSL 2023 2024'})
+📎 Result: [{"title": "Introduction to Nomad | Nomad | HashiCorp Developer", "url": "https://developer.hashicorp.com/nomad/tutorials/get-started/gs-overview", "snippet": "Tasks are executed by task drivers like ...
+
+🔧 Tool call: web_search({'query': 'Docker Swarm vs Kubernetes vs Nomad networking storage autoscaling learning curve'})
+📎 Result: [{"title": "Docker Swarm vs Kubernetes: Which is Better in 2026?", "url": "https://www.knowledgehut.com/blog/devops/docker-swarm-vs-kubernetes", "snippet": "Kubernetes vs Docker Swarm: Head-to-Head Co...
+
+🔧 Tool call: read_url({'url': 'https://dev.to/synsun/kubernetes-vs-docker-swarm-vs-nomad-lo-que-nadie-te-cuenta-hasta-que-pierdes-un-viernes-bi8'})
+📎 Result: Hace unos seis meses, mi equipo tenía un problema clásico de startup: doce microservicios corriendo en EC2 con Docker Compose y un script de deploy bash que tres de los cuatro ingenieros teníamos mied...
+
+🔧 Tool call: write_report({'filename': 'container_orchestrators_comparison.md', 'content': '<...повний текст звіту, див. example_output/report.md...>'})
+📎 Result: Звіт успішно збережено: /Users/garrynafig/research-agent/output/container_orchestrators_comparison.md
+
+Agent: Я підготував детальний порівняльний аналіз Docker Swarm, Kubernetes та Nomad і зберег його у файл `container_orchestrators_comparison.md`.
+[...коротке резюме, повний текст — у README/agent output...]
+
+You: повтори те саме
+
+🔧 Tool call: write_report({'filename': 'container_orchestrators_comparison.md', 'content': '<...той самий звіт, взятий з history без нового пошуку...>'})
+📎 Result: Звіт успішно збережено: /Users/garrynafig/research-agent/output/container_orchestrators_comparison.md
+
+Agent: Звіт збережено у файл `container_orchestrators_comparison.md`. Нижче наведено повний текст порівняльного аналізу:
+[...повний текст звіту...]
+
+Примітка: другий запит "повтори те саме" НЕ спричинив нових викликів web_search/read_url — агент
+узяв дані напряму з history (де вже лежав повний попередній звіт), що підтверджує коректну
+роботу ручної пам'яті (history list) і trim_history (важливий контекст не був передчасно обрізаний).

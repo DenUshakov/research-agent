@@ -7,7 +7,9 @@ class Settings(BaseSettings):
     google_api_key: str
     model_name: str = "gemini-3.6-flash"
     max_iterations: int = 10
-    max_tool_result_chars: int = 8000  # обрізання результатів tools
+    max_tool_result_chars: int = 8000
     output_dir: str = "output"
+    max_history_chars: int = 40000
+
 
 settings = Settings()

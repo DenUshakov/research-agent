@@ -13,11 +13,18 @@ def web_search(query: str) -> list[dict]:
     except Exception as e:
         return [{"error": f"Помилка пошуку: {e}"}]
 
-    return [
-        {"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")}
-        for r in raw_results
-    ]
-
+    snippet_limit = 300  # сніпет — короткий фрагмент, не потребує великого ліміту
+    results = []
+    for r in raw_results:
+        snippet = r.get("body", "")
+        if len(snippet) > snippet_limit:
+            snippet = snippet[:snippet_limit] + "..."
+        results.append({
+            "title": r.get("title", ""),
+            "url": r.get("href", ""),
+            "snippet": snippet,
+        })
+    return results
 
 def read_url(url: str) -> str:
     """Завантажує сторінку за URL і повертає її основний текст."""

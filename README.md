@@ -1,8 +1,8 @@
 # Research Agent
 
-Агент, який отримує питання від користувача, самостійно шукає інформацію в інтернеті через набір інструментів, і генерує структурований Markdown-звіт. Підтримує зв'язний діалог у межах сесії.
+Агент, який отримує питання від користувача, самостійно шукає інформацію — в інтернеті та в локальній базі знань — і генерує структурований Markdown-звіт із посиланнями на джерела. Підтримує зв'язний діалог у межах сесії.
 
-**Версія lesson-4:** ReAct-цикл реалізований власноруч, без агентних абстракцій фреймворків (`create_react_agent`, `AgentExecutor` тощо) — напряму через Gemini Interactions API. Попередня версія (на LangChain `create_agent`) зафіксована в git під тегом `lesson-3-complete`.
+**Версія lesson-5:** додано RAG-підсистему — локальну базу знань з hybrid retrieval (semantic + BM25) і cross-encoder reranking, доступну агенту через новий tool `knowledge_search`. Попередні версії зафіксовані в git тегами `lesson-3-complete` (LangChain `create_agent`) і `lesson-4-complete` (власний ReAct loop, лише web-джерела).
 
 ## Архітектура
 
@@ -10,46 +10,43 @@
 research-agent/
 ├── main.py       # Interactive REPL loop, керує history (пам'ять) вручну
 ├── agent.py      # Власний ReAct loop: виклик моделі → tool calls → результати → повтор
-├── tools.py      # web_search, read_url, write_report + їх JSON Schema декларації
+├── tools.py      # web_search, read_url, write_report, knowledge_search + JSON Schema
+├── retriever.py  # Hybrid retrieval (FAISS + BM25, RRF fusion) + cross-encoder reranking
+├── ingest.py     # Pipeline: PDF → сторінки → чанки → embeddings → FAISS індекс на диску
 ├── config.py     # Налаштування (Pydantic Settings, читає .env)
-├── prompts.py    # System prompt (Few-Shot, Chain-of-Thought, Self-Reflection)
+├── prompts.py    # System prompt (Few-Shot, Chain-of-Thought, Self-Reflection, цитування джерел)
 ├── requirements.txt
+├── data/         # PDF документи для індексації (вхід для ingest.py)
+├── index/        # Згенерований FAISS-індекс + метадані чанків (не в git)
 ├── example_output/
-│   └── report.md
+│   ├── report.md
+│   └── console_log.txt
 └── output/       # Згенеровані звіти (не в git)
 ```
 
-### Як працює власний ReAct loop
+### RAG-підсистема
 
-Замість того, щоб покладатись на фреймворк, `agent.py` реалізує цикл напряму:
+**1. Ingestion (`ingest.py`, запускається окремо командою `python ingest.py`):**
+- Читає всі PDF з `./data/`, витягує текст **по сторінках** (`pypdf`) — це зберігає можливість пізніше вказати точний номер сторінки як джерело.
+- Розбиває текст кожної сторінки на чанки (`langchain-text-splitters`, `RecursiveCharacterTextSplitter`, `CHUNK_SIZE`/`CHUNK_OVERLAP` з `.env`).
+- Обчислює embeddings для кожного чанка (`sentence-transformers`, модель `all-MiniLM-L6-v2`, локально, без API).
+- Зберігає векторний індекс (`faiss.IndexFlatIP`, cosine similarity через нормалізовані вектори) і метадані чанків (`chunks.pkl`) в `./index/` — індекс перезавантажується напряму з диска, без повторного обчислення embeddings.
 
-1. Надсилає в модель поточну історію (`history`) + описи tools (JSON Schema) + системний промпт.
-2. Модель повертає список "кроків" (`steps`) — це може бути текстова відповідь або `function_call` (запит на виклик tool).
-3. Якщо є `function_call` — код сам знаходить відповідну Python-функцію (`TOOL_FUNCTIONS`), викликає її з переданими аргументами, і додає результат назад у `history` як `function_result`.
-4. Цикл повторюється, поки модель не дасть фінальну текстову відповідь без запитів на tool calls, або поки не вичерпається ліміт ітерацій (`MAX_ITERATIONS`).
+**2. Retrieval (`retriever.py`, клас `Retriever`):**
+- **Semantic search** — FAISS шукає найближчі за cosine similarity чанки.
+- **BM25 search** (`rank-bm25`) — лексичний пошук за збігом слів, сильний на точних термінах і назвах, яких semantic search може не вловити.
+- **Reciprocal Rank Fusion (RRF)** — об'єднує обидва ранжовані списки за позицією (не за прямим скором — BM25-скор і cosine similarity живуть у несумісних шкалах).
+- **Cross-encoder reranking** (`cross-encoder/ms-marco-MiniLM-L-6-v2`) — точніше, але повільніше повторне ранжування вже звуженого пулу кандидатів; фінальний `top_k` (`KNOWLEDGE_SEARCH_TOP_K` з `.env`) віддається агенту.
 
-Використовується **Gemini Interactions API** (`client.interactions.create`) у **stateless-режимі** (`store=False`) — це означає, що вся історія розмови (`history`) зберігається і передається вручну на клієнті, без серверного `MemorySaver` чи подібних механізмів. Кожен виклик передає повний `history` заново.
+**3. Tool (`tools.py`, `knowledge_search`):**
+- Обгортка над `Retriever`, з лінивою ініціалізацією (модель embeddings і reranker завантажуються лише при першому реальному виклику, не при імпорті модуля).
+- В описі tool (JSON Schema) явно перелічені теми, які покриває поточна база знань — це допомагає моделі вирішувати, коли викликати `knowledge_search`, а коли одразу `web_search`.
 
-**Tools** (описані в `tools.py`):
-- `web_search(query)` — пошук в інтернеті через DuckDuckGo (`ddgs`), повертає короткі сніпети.
-- `read_url(url)` — читає повний текст сторінки (`trafilatura`), обрізаний до `MAX_TOOL_RESULT_CHARS` символів (context engineering).
-- `write_report(filename, content)` — зберігає фінальний Markdown-звіт у `output/`. Захищений від path traversal (`os.path.basename` + примусове розширення `.md`).
+### Агент і промпт
 
-**Обробка помилок реалізована на двох незалежних рівнях:**
-- Помилка всередині конкретного tool (наприклад, недоступний URL) — ловиться в самому tool і повертається як текстове повідомлення, яке модель бачить і на яке реагує.
-- Помилка виклику самої моделі (мережа, rate limit, недійсний ключ) — ловиться навколо `client.interactions.create()` в `agent.py`, не викликаючи краху процесу.
+Успадковано з lesson-4 (власний ReAct loop через Gemini Interactions API, `history` list як ручна пам'ять, `trim_history` для контролю росту контексту, retry з backoff на помилках моделі) — детальніше в коментарях коду `agent.py`.
 
-**Логування:** кожен tool call і його результат виводяться в консоль (`🔧 Tool call: ...` / `📎 Result: ...`).
-
-**Ліміт кроків:** `MAX_ITERATIONS` (з `.env`) обмежує кількість ітерацій циклу в `agent.py`, щоб агент не міг зациклитись нескінченно.
-
-### System Prompt
-
-`prompts.py` застосовує кілька технік промпт-інжинірингу:
-- **Chain-of-Thought** — агента явно просять проговорювати міркування (`Thought`) перед кожною дією.
-- **Few-Shot** — у промпт вбудований повний приклад бажаної поведінки (Thought → Action → Observation × N → Final Answer).
-- **Self-Reflection** — перед `write_report` агент має перевірити повноту й несуперечність зібраної інформації.
-- **Явні обмеження поведінки** — окремий розділ "чого НЕ робити" (не вигадувати факти, не викликати `write_report` передчасно, не повторювати ідентичні запити).
+`prompts.py` доповнено інструкцією стратегії вибору джерела: **спочатку `knowledge_search`** для тем локальної бази (RAG, LangChain, LLM), **потім `web_search`** для решти або якщо локальний пошук не дав достатньо — і явною вимогою позначати джерело (файл+сторінка або URL) для кожного ключового твердження у фінальному звіті.
 
 ## Встановлення
 
@@ -65,19 +62,31 @@ source venv/bin/activate   # macOS/Linux
 ```bash
 pip install -r requirements.txt
 ```
+> `sentence-transformers` тягне за собою `torch` — встановлення може зайняти кілька хвилин. Перший запуск `ingest.py`/`retriever.py` додатково завантажить дві моделі (embeddings ~90МБ, reranker ~90МБ) з Hugging Face — вони кешуються локально, повторні запуски вже офлайн.
 
-4. Отримай **Google API ключ** (безкоштовно, без карти) на [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → **"Create API key"** → **"Create API key in new project"** (це автоматично вмикає потрібний Gemini API для проєкту; ручне привʼязування до існуючого проєкту іноді призводить до помилки `403 SERVICE_DISABLED`).
+4. Отримай **Google API ключ** (безкоштовно, без карти) на [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → **"Create API key"** → **"Create API key in new project"**.
 
-5. Створи файл `.env` в корені проєкту (за зразком `.env.example`):
+5. Створи `.env` (за зразком `.env.example`):
 ```
 GOOGLE_API_KEY=твій_ключ_тут
 MODEL_NAME=gemini-3.6-flash
 MAX_ITERATIONS=10
 MAX_TOOL_RESULT_CHARS=8000
+MAX_HISTORY_CHARS=40000
 OUTPUT_DIR=output
+DATA_DIR=data
+INDEX_DIR=index
+EMBEDDING_MODEL=all-MiniLM-L6-v2
+RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+CHUNK_SIZE=1000
+CHUNK_OVERLAP=200
+KNOWLEDGE_SEARCH_TOP_K=5
 ```
 
-> Назва актуальної моделі Gemini може змінитись — перевіряй в [документації Google AI](https://ai.google.dev/gemini-api/docs/changelog), якщо отримаєш помилку `NOT_FOUND`.
+6. Поклади PDF-документи в `./data/` і побудуй індекс:
+```bash
+python ingest.py
+```
 
 ## Запуск
 
@@ -85,18 +94,18 @@ OUTPUT_DIR=output
 python main.py
 ```
 
-Приклад використання:
+Приклад використання (питання про тему з локальної бази):
 ```
-You: Порівняй Docker Swarm, Kubernetes та Nomad для оркестрації контейнерів
+You: Що таке RAG і як він доповнює LLM?
 
-🔧 Tool call: web_search({'query': 'Docker Swarm vs Kubernetes comparison'})
+🔧 Tool call: knowledge_search({'query': '...'})
+📎 Result: [retrieval-augmented-generation.pdf, стор. 1] ...
+
+🔧 Tool call: web_search({'query': '...'})   # для аспектів поза базою знань
 📎 Result: [...]
-🔧 Tool call: web_search({'query': 'Kubernetes vs Nomad comparison'})
-📎 Result: [...]
-🔧 Tool call: read_url({'url': 'https://...'})
-📎 Result: [...]
-🔧 Tool call: write_report({'filename': 'orchestrators_comparison.md', ...})
-📎 Result: Звіт успішно збережено: output/orchestrators_comparison.md
+
+🔧 Tool call: write_report({...})
+📎 Result: Звіт успішно збережено: output/rag_overview.md
 
 Agent: Звіт збережено. Основні висновки: ...
 ```
@@ -105,7 +114,8 @@ Agent: Звіт збережено. Основні висновки: ...
 
 ## Обмеження
 
-- Памʼять (`history`) зберігається лише в оперативній памʼяті процесу — при перезапуску `main.py` історія розмови втрачається.
-- Безкоштовний рівень Gemini API має ліміт запитів на хвилину (5–20, залежно від віку проєкту/акаунту) — при активному тестуванні легко натрапити на `429 Too Many Requests`. Це очікувана, а не критична помилка — агент коректно обробляє її, не завершуючи процес аварійно.
-- Follow-up питання іноді відповідаються на основі контексту попередніх кроків розмови без повторного пошуку — це очікувана поведінка ReAct-агента, коли наявної в `history` інформації достатньо.
-- Попередню версію на LangChain `create_agent` можна переглянути через `git checkout lesson-3-complete`.
+- Памʼять (`history`) живе лише в оперативній памʼяті процесу — при перезапуску `main.py` втрачається.
+- Безкоштовний рівень Gemini API має ліміт 5-20 запитів/хв (залежить від акаунту) — при активному тестуванні легко натрапити на `429`. Агент робить до 3 повторних спроб з backoff, але може вичерпати їх при затяжному вичерпанні квоти.
+- Локальна база знань наразі містить лише 3 документи (про RAG, LangChain, LLM) — `knowledge_search` поверне нерелевантні чанки на будь-яке інше питання, якщо агент його все ж викличе; коректна робота залежить від того, що системний промпт явно перелічує охоплені теми.
+- Індекс (`index/`) і embeddings — локальні, без API. Сам агент (LLM) все ще залежить від мережі й Gemini API.
+- Попередні версії доступні через `git checkout lesson-3-complete` / `lesson-4-complete`.

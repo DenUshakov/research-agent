@@ -1,33 +1,52 @@
-Research Agent (власний ReAct loop). Введи питання (або 'exit' для виходу).
+Research Agent (власний ReAct loop, з RAG). Введи питання (або 'exit' для виходу).
 
-You: Порівняй Docker Swarm, Kubernetes та Nomad для оркестрації контейнерів
+You: Що таке RAG і як він доповнює LLM?
 
-🔧 Tool call: web_search({'query': 'Docker Swarm vs Kubernetes vs Nomad comparison 2023 2024'})
-📎 Result: [{"title": "Nomad vs Kubernetes: Our 2024 Hard Data on... — slipjar.app", "url": "https://slipjar.app/en/blog/nomad-vs-kubernetes-our-2024-hard-data-on-orchestration/", "snippet": "We deployed Nomad a...
+🔧 Tool call: knowledge_search({'query': 'що таке RAG як він доповнює LLM Retrieval-Augmented Generation'})
+📎 Result: [retrieval-augmented-generation.pdf, стор. 1]
+Retrieval-augmented generation
+Retrieval-augmented generation (RAG) is a technique that enables large language models (LLMs) to
+retrieve and incorporate n...
 
-🔧 Tool call: web_search({'query': 'HashiCorp Nomad architecture task drivers license BSL 2023 2024'})
-📎 Result: [{"title": "Introduction to Nomad | Nomad | HashiCorp Developer", "url": "https://developer.hashicorp.com/nomad/tutorials/get-started/gs-overview", "snippet": "Tasks are executed by task drivers like ...
+🔧 Tool call: knowledge_search({'query': 'RAG vs fine-tuning advantages components vector database embeddings'})
+📎 Result: [retrieval-augmented-generation.pdf, стор. 2]
+embeddings, numerical representations in the form of a large
+vector space. RAG can be used on unstructured (usually text),
+semi-structured, or structured ...
 
-🔧 Tool call: web_search({'query': 'Docker Swarm vs Kubernetes vs Nomad networking storage autoscaling learning curve'})
-📎 Result: [{"title": "Docker Swarm vs Kubernetes: Which is Better in 2026?", "url": "https://www.knowledgehut.com/blog/devops/docker-swarm-vs-kubernetes", "snippet": "Kubernetes vs Docker Swarm: Head-to-Head Co...
+🔧 Tool call: web_search({'query': 'RAG vs Fine-tuning comparison advantages benefits'})
+📎 Result: [{"title": "RAG vs. Fine-tuning | IBM", "url": "https://www.ibm.com/think/topics/rag-vs-fine-tuning", ...}]
 
-🔧 Tool call: read_url({'url': 'https://dev.to/synsun/kubernetes-vs-docker-swarm-vs-nomad-lo-que-nadie-te-cuenta-hasta-que-pierdes-un-viernes-bi8'})
-📎 Result: Hace unos seis meses, mi equipo tenía un problema clásico de startup: doce microservicios corriendo en EC2 con Docker Compose y un script de deploy bash que tres de los cuatro ingenieros teníamos mied...
+🔧 Tool call: read_url({'url': 'https://www.ibm.com/think/topics/rag-vs-fine-tuning'})
+📎 Result: Retrieval augmented generation (RAG) and fine-tuning are two methods enterprises can use to get more value out of large language models (LLMs)...
 
-🔧 Tool call: write_report({'filename': 'container_orchestrators_comparison.md', 'content': '<...повний текст звіту, див. example_output/report.md...>'})
-📎 Result: Звіт успішно збережено: /Users/garrynafig/research-agent/output/container_orchestrators_comparison.md
+🔧 Tool call: write_report({'filename': 'rag_overview_and_llm_integration.md', 'content': '<...повний звіт, див. example_output/report.md...>'})
+📎 Result: Звіт успішно збережено: /Users/garrynafig/research-agent/output/rag_overview_and_llm_integration.md
 
-Agent: Я підготував детальний порівняльний аналіз Docker Swarm, Kubernetes та Nomad і зберег його у файл `container_orchestrators_comparison.md`.
-[...коротке резюме, повний текст — у README/agent output...]
+Agent: Звіт про Retrieval-Augmented Generation (RAG) та його роль у доповненні великих мовних
+моделей успішно сформовано та збережено у файл rag_overview_and_llm_integration.md.
+[...коротке резюме: визначення RAG, як він доповнює LLM, етапи роботи, RAG vs Fine-Tuning...]
 
-You: повтори те саме
+Примітка: агент самостійно обрав knowledge_search як перший інструмент (тема входить до
+локальної бази знань — retrieval-augmented-generation.pdf), і лише для аспекту порівняння
+з Fine-Tuning (тема поза базою знань) переключився на web_search + read_url. Це підтверджує
+коректну роботу стратегії вибору джерела, закладеної в system prompt.
 
-🔧 Tool call: write_report({'filename': 'container_orchestrators_comparison.md', 'content': '<...той самий звіт, взятий з history без нового пошуку...>'})
-📎 Result: Звіт успішно збережено: /Users/garrynafig/research-agent/output/container_orchestrators_comparison.md
+---
 
-Agent: Звіт збережено у файл `container_orchestrators_comparison.md`. Нижче наведено повний текст порівняльного аналізу:
-[...повний текст звіту...]
+Другий тест — питання ПОЗА темами локальної бази знань:
 
-Примітка: другий запит "повтори те саме" НЕ спричинив нових викликів web_search/read_url — агент
-узяв дані напряму з history (де вже лежав повний попередній звіт), що підтверджує коректну
-роботу ручної пам'яті (history list) і trim_history (важливий контекст не був передчасно обрізаний).
+You: Яка найкраща порода собак для квартири?
+
+🔧 Tool call: web_search({'query': 'найкращі породи собак для квартири'})
+📎 Result: [...]
+
+🔧 Tool call: web_search({'query': 'best apartment dogs American Kennel Club AKC'})
+📎 Result: [...]
+
+🔧 Tool call: read_url({'url': 'https://www.akc.org/expert-advice/lifestyle/best-dogs-for-apartments/'})
+📎 Result: [...]
+
+Примітка: knowledge_search ЖОДНОГО РАЗУ не викликаний — агент коректно розпізнав, що тема
+не стосується локальної бази знань (RAG/LangChain/LLM), і одразу пішов у web_search,
+як і очікувалось за описом tool та стратегією в system prompt.

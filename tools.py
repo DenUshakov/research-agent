@@ -4,6 +4,14 @@ from ddgs import DDGS
 import trafilatura
 
 from config import settings
+from retriever import Retriever
+
+def _get_retriever() -> Retriever:
+    global _retriever
+    if _retriever is None:
+        _retriever = Retriever()
+    return _retriever
+
 
 
 def web_search(query: str) -> list[dict]:
@@ -62,6 +70,28 @@ def write_report(filename: str, content: str) -> str:
 
     return f"Звіт успішно збережено: {os.path.abspath(path)}"
 
+_retriever = None
+
+def knowledge_search(query: str) -> str:
+    """Шукає інформацію в локальній базі знань (проіндексовані PDF документи)."""
+    try:
+        retriever = _get_retriever()
+    except FileNotFoundError as e:
+        return f"Помилка: {e}"
+
+    try:
+        results = retriever.search(query)
+    except Exception as e:
+        return f"Помилка пошуку в базі знань: {e}"
+
+    if not results:
+        return "У базі знань не знайдено релевантної інформації за цим запитом."
+
+    formatted = []
+    for r in results:
+        formatted.append(f"[{r['source']}, стор. {r['page']}]\n{r['text']}")
+    return "\n\n---\n\n".join(formatted)
+
 
 # --- JSON Schema декларації для tool calling API ---
 
@@ -114,6 +144,23 @@ TOOL_DECLARATIONS = [
             "required": ["filename", "content"],
         },
     },
+    {
+    "type": "function",
+    "name": "knowledge_search",
+    "description": (
+        "Шукає інформацію в локальній базі знань — проіндексованих документах "
+        "(наразі: про RAG, LangChain, великі мовні моделі). Використовуй ЗАВЖДИ, коли "
+        "питання користувача стосується цих тем, ДО того як звертатись до web_search — "
+        "локальна база містить перевірені, вже опрацьовані джерела."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Пошуковий запит"},
+        },
+        "required": ["query"],
+    },
+},
 ]
 
 
@@ -122,4 +169,5 @@ TOOL_FUNCTIONS = {
     "web_search": web_search,
     "read_url": read_url,
     "write_report": write_report,
+    "knowledge_search": knowledge_search,
 }

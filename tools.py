@@ -21,7 +21,7 @@ def web_search(query: str) -> list[dict]:
     except Exception as e:
         return [{"error": f"Помилка пошуку: {e}"}]
 
-    snippet_limit = 300  # сніпет — короткий фрагмент, не потребує великого ліміту
+    snippet_limit = settings.web_search_snippet_limit
     results = []
     for r in raw_results:
         snippet = r.get("body", "")

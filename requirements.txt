@@ -8,3 +8,4 @@ faiss-cpu==1.15.0
 rank-bm25==0.2.2
 pypdf==6.14.2
 langchain-text-splitters==1.1.2
+numpy==2.5.1

@@ -44,13 +44,14 @@ class Retriever:
         top_indices = np.argsort(scores)[::-1][:top_k]
         return [int(i) for i in top_indices]
 
-    def _reciprocal_rank_fusion(self, ranked_lists: list[list[int]], k: int = 60) -> list[int]:
+    def _reciprocal_rank_fusion(self, ranked_lists: list[list[int]], k: int = None) -> list[int]:
         """Об'єднує кілька ранжованих списків індексів у один через RRF.
 
         Кожен елемент отримує 1/(k + rank) балів з кожного списку, де він з'явився;
         бали підсумовуються. Це уникає проблеми несумісних шкал (BM25-скор і
         cosine similarity виміряні по-різному і напряму не додаються).
         """
+        k = k if k is not None else settings.rrf_k
         scores: dict[int, float] = {}
         for ranked in ranked_lists:
             for rank, idx in enumerate(ranked):
@@ -60,7 +61,7 @@ class Retriever:
     def search(self, query: str, top_k: int = None) -> list[dict]:
         """Повний pipeline: semantic + BM25 → RRF fusion → cross-encoder reranking → top_k."""
         top_k = top_k or settings.knowledge_search_top_k
-        candidate_pool = min(len(self.chunks), max(top_k * 4, 20))
+        candidate_pool = min(len(self.chunks), max(top_k * settings.candidate_pool_multiplier, 20))
 
         semantic_hits = self._semantic_search(query, candidate_pool)
         bm25_hits = self._bm25_search(query, candidate_pool)

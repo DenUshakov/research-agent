@@ -1,4 +1,7 @@
 import os
+import threading
+import requests
+
 
 from ddgs import DDGS
 import trafilatura
@@ -6,10 +9,16 @@ import trafilatura
 from config import settings
 from retriever import Retriever
 
+_retriever = None
+_retriever_lock = threading.Lock()
+
+
 def _get_retriever() -> Retriever:
     global _retriever
     if _retriever is None:
-        _retriever = Retriever()
+        with _retriever_lock:
+            if _retriever is None:
+                _retriever = Retriever()
     return _retriever
 
 
@@ -36,16 +45,19 @@ def web_search(query: str) -> list[dict]:
 
 def read_url(url: str) -> str:
     """Завантажує сторінку за URL і повертає її основний текст."""
-
     try:
-        downloaded = trafilatura.fetch_url(url)
-    except Exception as e:
+        response = requests.get(
+            url,
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchAgent/1.0)"},
+        )
+        response.raise_for_status()
+    except requests.exceptions.Timeout:
+        return f"Помилка: таймаут при завантаженні {url} (сервер не відповів за 10 секунд)."
+    except requests.exceptions.RequestException as e:
         return f"Помилка завантаження сторінки: {e}"
 
-    if downloaded is None:
-        return f"Не вдалося завантажити сторінку за адресою {url} (недоступна або невалідний URL)."
-
-    text = trafilatura.extract(downloaded)
+    text = trafilatura.extract(response.text)
     if not text:
         return f"Сторінку {url} завантажено, але не вдалося витягти текстовий вміст."
 
@@ -71,6 +83,10 @@ def write_report(filename: str, content: str) -> str:
     return f"Звіт успішно збережено: {os.path.abspath(path)}"
 
 _retriever = None
+
+def save_report(filename: str, content: str) -> str:
+    """Зберігає фінальний Markdown-звіт у файл у директорії output/. Захищена дія — потребує підтвердження користувача."""
+    return write_report(filename, content)
 
 def knowledge_search(query: str) -> str:
     """Шукає інформацію в локальній базі знань (проіндексовані PDF документи)."""

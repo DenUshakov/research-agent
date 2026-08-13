@@ -1,121 +1,88 @@
-# Research Agent
+# Research Agent — Multi-Agent System
 
-Агент, який отримує питання від користувача, самостійно шукає інформацію — в інтернеті та в локальній базі знань — і генерує структурований Markdown-звіт із посиланнями на джерела. Підтримує зв'язний діалог у межах сесії.
+Мультиагентна дослідницька система: Supervisor координує трьох спеціалізованих суб-агентів (Planner → Researcher → Critic) за патерном evaluator-optimizer, з людським затвердженням (HITL) перед збереженням фінального звіту.
 
-**Версія lesson-5:** додано RAG-підсистему — локальну базу знань з hybrid retrieval (semantic + BM25) і cross-encoder reranking, доступну агенту через новий tool `knowledge_search`. Попередні версії зафіксовані в git тегами `lesson-3-complete` (LangChain `create_agent`) і `lesson-4-complete` (власний ReAct loop, лише web-джерела).
+**Еволюція проєкту (git-теги):**
+- `lesson-3-complete` — базовий Research Agent на LangChain `create_agent`
+- `lesson-4-complete` — власний ReAct loop (без агентних абстракцій), Gemini Interactions API
+- `lesson-5-complete` — RAG: hybrid retrieval (FAISS + BM25 + RRF) з cross-encoder reranking
+- `lesson-8-complete` (поточна) — мультиагентна оркестрація, structured output, HITL
 
 ## Архітектура
 
 ```
 research-agent/
-├── main.py       # Interactive REPL loop, керує history (пам'ять) вручну
-├── agent.py      # Власний ReAct loop: виклик моделі → tool calls → результати → повтор
-├── tools.py      # web_search, read_url, write_report, knowledge_search + JSON Schema
-├── retriever.py  # Hybrid retrieval (FAISS + BM25, RRF fusion) + cross-encoder reranking
-├── ingest.py     # Pipeline: PDF → сторінки → чанки → embeddings → FAISS індекс на диску
-├── config.py     # Налаштування (Pydantic Settings, читає .env)
-├── prompts.py    # System prompt (Few-Shot, Chain-of-Thought, Self-Reflection, цитування джерел)
-├── requirements.txt
-├── data/         # PDF документи для індексації (вхід для ingest.py)
-├── index/        # Згенерований FAISS-індекс + метадані чанків (не в git)
-├── example_output/
-│   ├── report.md
-│   └── console_log.txt
-└── output/       # Згенеровані звіти (не в git)
+├── main.py              # REPL з обробкою interrupt/resume
+├── supervisor.py         # Supervisor + agent-as-tool обгортки (plan/research/critique)
+├── agents/
+│   ├── planner.py        # Planner Agent → структурований ResearchPlan
+│   ├── research.py       # Research Agent → знахідки з цитатами
+│   └── critic.py         # Critic Agent → структурований CritiqueResult
+├── schemas.py            # Pydantic-моделі ResearchPlan, CritiqueResult
+├── tools.py               # web_search, read_url, knowledge_search, write_report, save_report
+├── retriever.py           # Hybrid retrieval + reranking (з lesson-5)
+├── ingest.py               # PDF → chunks → embeddings → FAISS (з lesson-5)
+├── config.py               # Settings + системні промпти всіх 4 агентів
+├── data/                   # PDF для індексації
+├── index/                  # FAISS-індекс (генерується, не в git)
+└── output/                 # Збережені звіти (не в git)
 ```
 
-### RAG-підсистема
+### Потік виконання
 
-**1. Ingestion (`ingest.py`, запускається окремо командою `python ingest.py`):**
-- Читає всі PDF з `./data/`, витягує текст **по сторінках** (`pypdf`) — це зберігає можливість пізніше вказати точний номер сторінки як джерело.
-- Розбиває текст кожної сторінки на чанки (`langchain-text-splitters`, `RecursiveCharacterTextSplitter`, `CHUNK_SIZE`/`CHUNK_OVERLAP` з `.env`).
-- Обчислює embeddings для кожного чанка (`sentence-transformers`, модель `all-MiniLM-L6-v2`, локально, без API).
-- Зберігає векторний індекс (`faiss.IndexFlatIP`, cosine similarity через нормалізовані вектори) і метадані чанків (`chunks.pkl`) в `./index/` — індекс перезавантажується напряму з диска, без повторного обчислення embeddings.
+```
+User → Supervisor
+         │
+         ├─ plan(request)      → Planner  → ResearchPlan (goal, queries, sources, format)
+         ├─ research(...)      → Researcher → знахідки (web + knowledge_base, з цитатами)
+         ├─ critique(...)      → Critic    → CritiqueResult (verdict, gaps, revision_requests)
+         │     │
+         │     ├─ REVISE → research() ще раз з revision_requests (до MAX_REVISION_ROUNDS разів)
+         │     └─ APPROVE → формування фінального звіту
+         │
+         └─ save_report(...) ── HITL interrupt ──► людина: approve / edit / reject
+```
 
-**2. Retrieval (`retriever.py`, клас `Retriever`):**
-- **Semantic search** — FAISS шукає найближчі за cosine similarity чанки.
-- **BM25 search** (`rank-bm25`) — лексичний пошук за збігом слів, сильний на точних термінах і назвах, яких semantic search може не вловити.
-- **Reciprocal Rank Fusion (RRF)** — об'єднує обидва ранжовані списки за позицією (не за прямим скором — BM25-скор і cosine similarity живуть у несумісних шкалах).
-- **Cross-encoder reranking** (`cross-encoder/ms-marco-MiniLM-L-6-v2`) — точніше, але повільніше повторне ранжування вже звуженого пулу кандидатів; фінальний `top_k` (`KNOWLEDGE_SEARCH_TOP_K` з `.env`) віддається агенту.
+Кожен суб-агент (`Planner`, `Researcher`, `Critic`) — це **окремий `create_agent`**, обгорнутий у звичайну Python-функцію (`plan`/`research`/`critique`), яку Supervisor викликає як tool. Обгортки серіалізують структурований вивід (`ResearchPlan`/`CritiqueResult`) у JSON-рядок, щоб Supervisor міг прочитати результат і прийняти рішення про наступний крок.
 
-**3. Tool (`tools.py`, `knowledge_search`):**
-- Обгортка над `Retriever`, з лінивою ініціалізацією (модель embeddings і reranker завантажуються лише при першому реальному виклику, не при імпорті модуля).
-- В описі tool (JSON Schema) явно перелічені теми, які покриває поточна база знань — це допомагає моделі вирішувати, коли викликати `knowledge_search`, а коли одразу `web_search`.
+### Human-in-the-Loop (HITL)
 
-### Агент і промпт
+`save_report` захищено `HumanInTheLoopMiddleware(interrupt_on={"save_report": True})` — граф зупиняється перед фактичним записом файлу і чекає рішення:
+- **approve** — зберегти як є
+- **edit** — людина дає текстовий фідбек; Supervisor доопрацьовує звіт і знову викликає `save_report` (новий interrupt)
+- **reject** — відхилити з поясненням
 
-Успадковано з lesson-4 (власний ReAct loop через Gemini Interactions API, `history` list як ручна пам'ять, `trim_history` для контролю росту контексту, retry з backoff на помилках моделі) — детальніше в коментарях коду `agent.py`.
-
-`prompts.py` доповнено інструкцією стратегії вибору джерела: **спочатку `knowledge_search`** для тем локальної бази (RAG, LangChain, LLM), **потім `web_search`** для решти або якщо локальний пошук не дав достатньо — і явною вимогою позначати джерело (файл+сторінка або URL) для кожного ключового твердження у фінальному звіті.
+⚠️ **Технічна деталь, відмінна від прикладу в завданні:** офіційний приклад показує `edit` через `{"type": "edit", "edited_action": {"feedback": ...}}`. У встановленій версії (`langchain==1.3.14`) `edit` вимагає **прямої заміни аргументів tool** (`name` + `args`), а не довільного тексту. Натомість `main.py` реалізує "дай фідбек і перероби" через **`{"type": "reject", "message": ...}`** — `reject` коректно сигналізує Supervisor'у, що виклик не відбувся і потрібно спробувати ще раз, тоді як `respond` (четвертий тип рішення) для цього **не підходить**: він підміняє результат tool текстом фідбеку, змушуючи модель хибно вважати, що `save_report` уже виконався (перевірено емпірично — файл не зберігався, хоча агент рапортував про успіх).
 
 ## Встановлення
 
-1. Клонуй репозиторій і перейди в папку проєкту.
+1. `python3 -m venv venv && source venv/bin/activate`
+2. `pip install -r requirements.txt` (тягне `torch` через `sentence-transformers` — може зайняти кілька хвилин)
+3. Отримай **Google API ключ**: [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → "Create API key" → "Create API key in new project"
+4. Скопіюй `.env.example` в `.env`, встав ключ
+5. Поклади PDF в `./data/`, побудуй індекс: `python ingest.py`
+6. `python main.py`
 
-2. Створи та активуй віртуальне середовище (Python 3.10+):
-```bash
-python3 -m venv venv
-source venv/bin/activate   # macOS/Linux
-```
+## Про вибір моделі: чому не `gemini-3.6-flash`
 
-3. Встанови залежності:
-```bash
-pip install -r requirements.txt
-```
-> `sentence-transformers` тягне за собою `torch` — встановлення може зайняти кілька хвилин. Перший запуск `ingest.py`/`retriever.py` додатково завантажить дві моделі (embeddings ~90МБ, reranker ~90МБ) з Hugging Face — вони кешуються локально, повторні запуски вже офлайн.
+Спершу проєкт використовував `gemini-3.6-flash`, але ця (preview) модель має вкрай суворий безкоштовний ліміт — **20 запитів/день**, незалежно від того, скільки різних Google-акаунтів/проєктів створено (ліміт прив'язаний до моделі, не лише до проєкту). Мультиагентний прогін (Planner + Researcher + Critic, можливо кілька раундів revise) легко витрачає 15-20+ викликів **за один запит користувача** — тобто практично весь денний ліміт за раз.
 
-4. Отримай **Google API ключ** (безкоштовно, без карти) на [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → **"Create API key"** → **"Create API key in new project"**.
+**Рішення:** `gemini-3.5-flash-lite` — стабільна (GA, не preview) модель з набагато щедрішим лімітом, достатнім для розробки й тестування мультиагентних систем.
 
-5. Створи `.env` (за зразком `.env.example`):
-```
-GOOGLE_API_KEY=твій_ключ_тут
-MODEL_NAME=gemini-3.6-flash
-MAX_ITERATIONS=10
-MAX_TOOL_RESULT_CHARS=8000
-MAX_HISTORY_CHARS=40000
-OUTPUT_DIR=output
-DATA_DIR=data
-INDEX_DIR=index
-EMBEDDING_MODEL=all-MiniLM-L6-v2
-RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
-CHUNK_SIZE=1000
-CHUNK_OVERLAP=200
-KNOWLEDGE_SEARCH_TOP_K=5
-```
+## Технічні нюанси, виявлені під час розробки
 
-6. Поклади PDF-документи в `./data/` і побудуй індекс:
-```bash
-python ingest.py
-```
-
-## Запуск
-
-```bash
-python main.py
-```
-
-Приклад використання (питання про тему з локальної бази):
-```
-You: Що таке RAG і як він доповнює LLM?
-
-🔧 Tool call: knowledge_search({'query': '...'})
-📎 Result: [retrieval-augmented-generation.pdf, стор. 1] ...
-
-🔧 Tool call: web_search({'query': '...'})   # для аспектів поза базою знань
-📎 Result: [...]
-
-🔧 Tool call: write_report({...})
-📎 Result: Звіт успішно збережено: output/rag_overview.md
-
-Agent: Звіт збережено. Основні висновки: ...
-```
-
-Для виходу — введи `exit` або `quit`.
+- **`device="cpu"` для `sentence-transformers`/`CrossEncoder`** (`retriever.py`): на Apple Silicon PyTorch за замовчуванням намагається використати MPS (Metal), що зависає намертво при виклику з фонового потоку — а LangGraph виконує tool calls саме в таких потоках. Примусовий CPU вирішує це ціною невеликої втрати швидкості (непомітно на нашому маленькому корпусі).
+- **`read_url` використовує `requests.get(..., timeout=10)`**, а не `trafilatura.fetch_url()` напряму: вбудований таймаут `trafilatura` реалізований через `signal`, який **не працює поза головним потоком** — тому зависання на "мовчазних" серверах не переривалось. `trafilatura.extract()` лишається для парсингу вже завантаженого HTML.
+- **`threading.Lock()` навколо lazy-ініціалізації `Retriever`** (`tools.py`): паралельні tool calls (наприклад, кілька `knowledge_search` одночасно від різних суб-агентів) без блокування спричиняли одночасне завантаження кількох копій моделей embeddings у різних потоках — нестабільно на macOS (`malloc` crashes).
+- **`.with_retry()` несумісний з `create_agent`**: обгортання моделі в retry-логіку ламає `.bind_tools()`, необхідний для tool calling. Ретраї на рівні LLM-клієнта тут не застосовуються.
 
 ## Обмеження
 
-- Памʼять (`history`) живе лише в оперативній памʼяті процесу — при перезапуску `main.py` втрачається.
-- Безкоштовний рівень Gemini API має ліміт 5-20 запитів/хв (залежить від акаунту) — при активному тестуванні легко натрапити на `429`. Агент робить до 3 повторних спроб з backoff, але може вичерпати їх при затяжному вичерпанні квоти.
-- Локальна база знань наразі містить лише 3 документи (про RAG, LangChain, LLM) — `knowledge_search` поверне нерелевантні чанки на будь-яке інше питання, якщо агент його все ж викличе; коректна робота залежить від того, що системний промпт явно перелічує охоплені теми.
-- Індекс (`index/`) і embeddings — локальні, без API. Сам агент (LLM) все ще залежить від мережі й Gemini API.
-- Попередні версії доступні через `git checkout lesson-3-complete` / `lesson-4-complete`.
+- **`reject` завжди веде до повторної спроби**, а не до справжнього скасування — `SUPERVISOR_SYSTEM_PROMPT` трактує будь-яке відхилення як "доопрацюй і спробуй знову". Немає жорсткого способу сказати "остаточно відмінити" без виходу з програми.
+- Цикл затвердження (`approve`/`edit`/`reject`) після `critique` APPROVE **не обмежений** кількістю спроб (на відміну від `research`↔`critique`, обмеженого `MAX_REVISION_ROUNDS`) — теоретично можна відхиляти нескінченно.
+- Безкоштовна квота Gemini (навіть на `flash-lite`) обмежена — активне тестування мультиагентного циклу може вичерпати денний ліміт.
+- `knowledge_search` покриває лише 3 документи (RAG, LangChain, LLM) — на інші теми `Planner`/`Researcher` покладаються виключно на `web_search`.
+
+## Тестування циклу REVISE
+
+Логіка REVISE (Critic → gaps → Researcher повторно з revision_requests) реалізована в `SUPERVISOR_SYSTEM_PROMPT` і перевірена ізольовано: прямий виклик `Critic Agent` на навмисно неповному дослідженні коректно повернув `verdict="REVISE"` з конкретними `gaps`/`revision_requests` (див. розробницький лог). У живих прогонах через повний `Supervisor` (кілька спроб з різними темами) Critic послідовно давав `APPROVE` з першої спроби — Research Agent виявився достатньо ретельним, щоб не тригерити REVISE органічно в рамках доступного тестового бюджету (безкоштовна квота Gemini). Механізм REVISE присутній у коді й системному промпті, готовий спрацювати, коли Critic дійсно виявить прогалини.

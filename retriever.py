@@ -25,8 +25,8 @@ class Retriever:
         with open(chunks_path, "rb") as f:
             self.chunks = pickle.load(f)
 
-        self.embed_model = SentenceTransformer(settings.embedding_model)
-        self.reranker = CrossEncoder(settings.reranker_model)
+        self.embed_model = SentenceTransformer(settings.embedding_model, device="cpu")
+        self.reranker = CrossEncoder(settings.reranker_model, device="cpu")
 
         # BM25 будується по тим самим чанкам, що й FAISS-індекс — той самий порядок
         tokenized_corpus = [c["text"].lower().split() for c in self.chunks]

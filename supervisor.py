@@ -1,108 +1,78 @@
+import asyncio
 import json
+import httpx
 
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langgraph.checkpoint.memory import InMemorySaver
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from a2a.client import create_client, ClientConfig
+from a2a.helpers import new_text_message
+from a2a.types import SendMessageRequest
 
 from config import settings, SUPERVISOR_SYSTEM_PROMPT
-from agents.planner import build_planner_agent
-from agents.research import build_research_agent
-from agents.critic import build_critic_agent
-from tools import save_report
-
-_planner = None
-_researcher = None
-_critic = None
 
 
-def _get_planner():
-    global _planner
-    if _planner is None:
-        _planner = build_planner_agent()
-    return _planner
+async def _delegate(url: str, text: str) -> str:
+    """Надсилає текстове повідомлення A2A-агенту за URL і повертає текст відповіді."""
+    httpx_client = httpx.AsyncClient(timeout=180.0)
+    config = ClientConfig(httpx_client=httpx_client)
+    client = await create_client(url, client_config=config)
+    message = new_text_message(text=text)
+    request = SendMessageRequest(message=message)
+    async for event in client.send_message(request):
+        parts = event.message.parts
+        return "\n".join(p.text for p in parts if p.text)
+    return ""
 
 
-def _get_researcher():
-    global _researcher
-    if _researcher is None:
-        _researcher = build_research_agent()
-    return _researcher
+async def delegate_to_planner(request: str) -> str:
+    """Надсилає запит Planner Agent (через A2A) для декомпозиції у структурований план дослідження."""
+    print(f"\n[Supervisor --A2A--> Planner]\n🔧 delegate_to_planner({request[:80]!r})")
+    url = f"http://127.0.0.1:{settings.planner_a2a_port}"
+    result = await _delegate(url, request)
+    print(f"  📎 {result[:150]}...")
+    return result
 
 
-def _get_critic():
-    global _critic
-    if _critic is None:
-        _critic = build_critic_agent()
-    return _critic
+async def delegate_to_researcher(request: str) -> str:
+    """Надсилає завдання Research Agent (через A2A) для збору знахідок."""
+    print(f"\n[Supervisor --A2A--> Researcher]\n🔧 delegate_to_researcher({request[:80]!r})")
+    url = f"http://127.0.0.1:{settings.researcher_a2a_port}"
+    result = await _delegate(url, request)
+    print(f"  📎 Findings ({len(result)} chars)")
+    return result
 
 
-def _extract_text(content) -> str:
-    """Витягує чистий текст з content, який може бути рядком або списком блоків (Gemini)."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
-    return str(content)
+async def delegate_to_critic(findings: str) -> str:
+    """Надсилає знахідки Critic Agent (через A2A) для незалежної оцінки якості."""
+    print(f"\n[Supervisor --A2A--> Critic]\n🔧 delegate_to_critic(...)")
+    url = f"http://127.0.0.1:{settings.critic_a2a_port}"
+    result = await _delegate(url, findings)
+    print(f"  📎 {result[:200]}...")
+    return result
 
-
-def plan(request: str) -> str:
-    """Декомпозує запит користувача у структурований план дослідження (ResearchPlan): ціль, конкретні пошукові запити, джерела для перевірки, формат виводу. Викликай ПЕРШИМ для будь-якого дослідницького запиту."""
-    print(f"\n[Supervisor → Planner]\n🔧 plan({request[:80]!r})")
-    result = _get_planner().invoke({"messages": [{"role": "user", "content": request}]})
-    p = result["structured_response"]
-    print(f"  📎 ResearchPlan(goal={p.goal!r}, queries={p.search_queries})")
-    return json.dumps(
-        {
-            "goal": p.goal,
-            "search_queries": p.search_queries,
-            "sources_to_check": p.sources_to_check,
-            "output_format": p.output_format,
-        },
-        ensure_ascii=False,
+async def _get_search_mcp_tools():
+    client = MultiServerMCPClient(
+        {"report": {"transport": "streamable_http", "url": settings.report_mcp_url}}
     )
+    return await client.get_tools()
 
 
-def research(request: str) -> str:
-    """Виконує дослідження за планом або за конкретним завданням доопрацювання від Critic. Повертає зібрані знахідки текстом, з позначками джерел."""
-    print(f"\n[Supervisor → Researcher]\n🔧 research({request[:80]!r})")
-    result = _get_researcher().invoke({"messages": [{"role": "user", "content": request}]})
-    content = _extract_text(result["messages"][-1].content)
-    print(f"  📎 Findings collected ({len(content)} chars)")
-    return content
+async def build_supervisor():
+    tools = await _get_search_mcp_tools()
 
-
-def critique(findings: str) -> str:
-    """Незалежно оцінює якість дослідження (findings) за freshness/completeness/structure. Повертає структурований CritiqueResult (verdict, gaps, revision_requests) як текст."""
-    print(f"\n[Supervisor → Critic]\n🔧 critique(...)")
-    result = _get_critic().invoke({"messages": [{"role": "user", "content": findings}]})
-    c = result["structured_response"]
-    print(f"  📎 CritiqueResult(verdict={c.verdict}, gaps={c.gaps})")
-    return json.dumps(
-        {
-            "verdict": c.verdict,
-            "is_fresh": c.is_fresh,
-            "is_complete": c.is_complete,
-            "is_well_structured": c.is_well_structured,
-            "strengths": c.strengths,
-            "gaps": c.gaps,
-            "revision_requests": c.revision_requests,
-        },
-        ensure_ascii=False,
-    )
-
-
-def build_supervisor():
     model = init_chat_model(
         f"google_genai:{settings.model_name}",
         api_key=settings.google_api_key,
     )
     return create_agent(
         model=model,
-        tools=[plan, research, critique, save_report],
+        tools=[delegate_to_planner, delegate_to_researcher, delegate_to_critic, *tools],
         system_prompt=SUPERVISOR_SYSTEM_PROMPT,
         middleware=[
-            HumanInTheLoopMiddleware(interrupt_on={"save_report": True}),
+            HumanInTheLoopMiddleware(interrupt_on={"save_report_tool": True}),
         ],
         checkpointer=InMemorySaver(),
     )

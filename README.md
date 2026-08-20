@@ -1,88 +1,89 @@
-# Research Agent — Multi-Agent System
+# Research Agent — MCP + A2A Multi-Agent System
 
-Мультиагентна дослідницька система: Supervisor координує трьох спеціалізованих суб-агентів (Planner → Researcher → Critic) за патерном evaluator-optimizer, з людським затвердженням (HITL) перед збереженням фінального звіту.
+Мультиагентна дослідницька система, де tools винесені в окремі MCP-сервери, а суб-агенти (Planner/Researcher/Critic) — в окремі A2A-сервери. Supervisor — локальний оркестратор, що делегує роботу через A2A-протокол і отримує tools (`save_report`) через MCP.
 
-**Еволюція проєкту (git-теги):**
-- `lesson-3-complete` — базовий Research Agent на LangChain `create_agent`
-- `lesson-4-complete` — власний ReAct loop (без агентних абстракцій), Gemini Interactions API
-- `lesson-5-complete` — RAG: hybrid retrieval (FAISS + BM25 + RRF) з cross-encoder reranking
-- `lesson-8-complete` (поточна) — мультиагентна оркестрація, structured output, HITL
+**Еволюція проєкту (git-теги):** `lesson-3` (LangChain `create_agent`) → `lesson-4` (власний ReAct loop) → `lesson-5` (RAG) → `lesson-8` (мультиагентність в одному процесі) → `lesson-10` (поточна: розподілена архітектура через MCP+A2A).
 
 ## Архітектура
 
 ```
-research-agent/
-├── main.py              # REPL з обробкою interrupt/resume
-├── supervisor.py         # Supervisor + agent-as-tool обгортки (plan/research/critique)
-├── agents/
-│   ├── planner.py        # Planner Agent → структурований ResearchPlan
-│   ├── research.py       # Research Agent → знахідки з цитатами
-│   └── critic.py         # Critic Agent → структурований CritiqueResult
-├── schemas.py            # Pydantic-моделі ResearchPlan, CritiqueResult
-├── tools.py               # web_search, read_url, knowledge_search, write_report, save_report
-├── retriever.py           # Hybrid retrieval + reranking (з lesson-5)
-├── ingest.py               # PDF → chunks → embeddings → FAISS (з lesson-5)
-├── config.py               # Settings + системні промпти всіх 4 агентів
-├── data/                   # PDF для індексації
-├── index/                  # FAISS-індекс (генерується, не в git)
-└── output/                 # Збережені звіти (не в git)
+User (main.py, REPL)
+  │
+  ▼
+Supervisor (локальний create_agent)
+  │
+  ├── delegate_to_planner   ──► A2A (8903) ──► Planner Agent    ──► MCP (8901, SearchMCP)
+  ├── delegate_to_researcher ──► A2A (8904) ──► Research Agent  ──► MCP (8901, SearchMCP)
+  ├── delegate_to_critic    ──► A2A (8905) ──► Critic Agent     ──► MCP (8901, SearchMCP)
+  │
+  └── save_report_tool       ──► MCP (8902, ReportMCP) ── HITL gated
 ```
 
-### Потік виконання
-
-```
-User → Supervisor
-         │
-         ├─ plan(request)      → Planner  → ResearchPlan (goal, queries, sources, format)
-         ├─ research(...)      → Researcher → знахідки (web + knowledge_base, з цитатами)
-         ├─ critique(...)      → Critic    → CritiqueResult (verdict, gaps, revision_requests)
-         │     │
-         │     ├─ REVISE → research() ще раз з revision_requests (до MAX_REVISION_ROUNDS разів)
-         │     └─ APPROVE → формування фінального звіту
-         │
-         └─ save_report(...) ── HITL interrupt ──► людина: approve / edit / reject
+**6 окремих процесів**, кожен свій термінал:
+```bash
+python ingest.py                    # 1. побудувати RAG-індекс (одноразово)
+python -m mcp_servers.search_mcp    # 2. SearchMCP, порт 8901
+python -m mcp_servers.report_mcp    # 3. ReportMCP, порт 8902
+python a2a_servers.py               # 4. Planner+Researcher+Critic, порти 8903-8905
+python main.py                      # 5. Supervisor REPL (запускати останнім)
 ```
 
-Кожен суб-агент (`Planner`, `Researcher`, `Critic`) — це **окремий `create_agent`**, обгорнутий у звичайну Python-функцію (`plan`/`research`/`critique`), яку Supervisor викликає як tool. Обгортки серіалізують структурований вивід (`ResearchPlan`/`CritiqueResult`) у JSON-рядок, щоб Supervisor міг прочитати результат і прийняти рішення про наступний крок.
+### MCP-сервери (`mcp_servers/`)
 
-### Human-in-the-Loop (HITL)
+- **SearchMCP** (8901) — `web_search_tool`, `read_url_tool`, `knowledge_search_tool` (обгортки над `tools.py`); resource `resource://knowledge-base-stats`.
+- **ReportMCP** (8902) — `save_report_tool`; resource `resource://output-dir`.
+- Обидва прогрівають `Retriever`/RAG-модель **синхронно, в головному потоці, до старту сервера** (`preload_retriever()`) — критично важливо, див. "Технічні нюанси" нижче.
 
-`save_report` захищено `HumanInTheLoopMiddleware(interrupt_on={"save_report": True})` — граф зупиняється перед фактичним записом файлу і чекає рішення:
-- **approve** — зберегти як є
-- **edit** — людина дає текстовий фідбек; Supervisor доопрацьовує звіт і знову викликає `save_report` (новий interrupt)
-- **reject** — відхилити з поясненням
+### A2A-сервери (`a2a_servers.py`, один процес, три сервери паралельно)
 
-⚠️ **Технічна деталь, відмінна від прикладу в завданні:** офіційний приклад показує `edit` через `{"type": "edit", "edited_action": {"feedback": ...}}`. У встановленій версії (`langchain==1.3.14`) `edit` вимагає **прямої заміни аргументів tool** (`name` + `args`), а не довільного тексту. Натомість `main.py` реалізує "дай фідбек і перероби" через **`{"type": "reject", "message": ...}`** — `reject` коректно сигналізує Supervisor'у, що виклик не відбувся і потрібно спробувати ще раз, тоді як `respond` (четвертий тип рішення) для цього **не підходить**: він підміняє результат tool текстом фідбеку, змушуючи модель хибно вважати, що `save_report` уже виконався (перевірено емпірично — файл не зберігався, хоча агент рапортував про успіх).
+Кожен суб-агент (Planner/Researcher/Critic) — окремий A2A-сервер зі своєю Agent Card (`/.well-known/agent-card.json`), що отримує tools із SearchMCP через `langchain_mcp_adapters.MultiServerMCPClient`. Спільний клас `LangChainAgentExecutor` обгортає будь-якого `create_agent`-агента в A2A `AgentExecutor` (лінива ініціалізація через `asyncio.Lock`).
 
-## Встановлення
+### Supervisor (`supervisor.py`)
 
-1. `python3 -m venv venv && source venv/bin/activate`
-2. `pip install -r requirements.txt` (тягне `torch` через `sentence-transformers` — може зайняти кілька хвилин)
-3. Отримай **Google API ключ**: [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → "Create API key" → "Create API key in new project"
-4. Скопіюй `.env.example` в `.env`, встав ключ
-5. Поклади PDF в `./data/`, побудуй індекс: `python ingest.py`
-6. `python main.py`
+Локальний `create_agent` з чотирма tools: три асинхронні обгортки-делегати (`delegate_to_planner/researcher/critic`, кожна робить A2A `send_message` виклик до відповідного сервера) плюс `save_report_tool`, отриманий через MCP з `ReportMCP`. HITL захищає саме `save_report_tool`.
 
-## Про вибір моделі: чому не `gemini-3.6-flash`
+## Встановлення й запуск
 
-Спершу проєкт використовував `gemini-3.6-flash`, але ця (preview) модель має вкрай суворий безкоштовний ліміт — **20 запитів/день**, незалежно від того, скільки різних Google-акаунтів/проєктів створено (ліміт прив'язаний до моделі, не лише до проєкту). Мультиагентний прогін (Planner + Researcher + Critic, можливо кілька раундів revise) легко витрачає 15-20+ викликів **за один запит користувача** — тобто практично весь денний ліміт за раз.
+1. `python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`
+2. Скопіюй `.env.example` в `.env`, встав ключ ([aistudio.google.com/apikey](https://aistudio.google.com/apikey) → "Create API key in new project")
+3. `python ingest.py` — будує RAG-індекс з `./data/`
+4. У **чотирьох окремих терміналах** (кожен з активованим venv), по одній команді:
+```bash
+   python -m mcp_servers.search_mcp
+   python -m mcp_servers.report_mcp
+   python a2a_servers.py
+```
+5. У **п'ятому** терміналі: `python main.py`
 
-**Рішення:** `gemini-3.5-flash-lite` — стабільна (GA, не preview) модель з набагато щедрішим лімітом, достатнім для розробки й тестування мультиагентних систем.
+## Про версію `a2a-sdk`: чому код відрізняється від офіційних прикладів
 
-## Технічні нюанси, виявлені під час розробки
+Практично **весь** API `a2a-sdk` (1.1.2), з яким ми зіткнулись, розходиться з документацією й туторіалами (навіть офіційними), знайденими в пошуку — судячи з усього, це наслідок швидкого розвитку протоколу (v1.0 вийшов у березні 2026). Конкретні розбіжності:
 
-- **`device="cpu"` для `sentence-transformers`/`CrossEncoder`** (`retriever.py`): на Apple Silicon PyTorch за замовчуванням намагається використати MPS (Metal), що зависає намертво при виклику з фонового потоку — а LangGraph виконує tool calls саме в таких потоках. Примусовий CPU вирішує це ціною невеликої втрати швидкості (непомітно на нашому маленькому корпусі).
-- **`read_url` використовує `requests.get(..., timeout=10)`**, а не `trafilatura.fetch_url()` напряму: вбудований таймаут `trafilatura` реалізований через `signal`, який **не працює поза головним потоком** — тому зависання на "мовчазних" серверах не переривалось. `trafilatura.extract()` лишається для парсингу вже завантаженого HTML.
-- **`threading.Lock()` навколо lazy-ініціалізації `Retriever`** (`tools.py`): паралельні tool calls (наприклад, кілька `knowledge_search` одночасно від різних суб-агентів) без блокування спричиняли одночасне завантаження кількох копій моделей embeddings у різних потоках — нестабільно на macOS (`malloc` crashes).
-- **`.with_retry()` несумісний з `create_agent`**: обгортання моделі в retry-логіку ламає `.bind_tools()`, необхідний для tool calling. Ретраї на рівні LLM-клієнта тут не застосовуються.
+| Документація/туторіали показують | Реально працює (1.1.2) |
+|---|---|
+| `A2AStarletteApplication(agent_card=..., http_handler=...)` | `Starlette(routes=create_agent_card_routes(agent_card=card) + create_jsonrpc_routes(request_handler=handler, rpc_url="/"))` |
+| `from a2a.utils import new_agent_text_message` | `from a2a.helpers import new_text_message` |
+| `AgentCard(url="http://...", ...)` (просте поле) | `AgentCard(supported_interfaces=[AgentInterface(url=..., protocol_binding=TransportProtocol.JSONRPC, protocol_version="1.0")])` — `AgentCard` тепер protobuf-повідомлення, не Pydantic |
+| `DefaultRequestHandler(agent_executor=..., task_store=...)` | Той самий + обов'язковий `agent_card=card` |
+| `create_client(url)` + `client.send_message(message)` | `create_client(url, client_config=ClientConfig(httpx_client=httpx.AsyncClient(timeout=180)))` + `client.send_message(SendMessageRequest(message=message))` — потрібен явний `httpx.AsyncClient` з довгим таймаутом, інакше запит обривається за замовчуванням через ~10с (`resolver_http_kwargs` впливає лише на завантаження Agent Card, не на сам запит) |
+
+Кожна з цих розбіжностей знайдена методом реального запуску й читання traceback — а не здогадкою. Якщо `a2a-sdk` оновиться, ці деталі можуть знову змінитись; перевіряй `python -c "help(a2a.client.create_client)"` та подібне перед довірою до будь-якого туторіалу.
+
+## Технічні нюанси (специфічно для розподіленої архітектури)
+
+- **`preload_retriever()` перед стартом кожного MCP/A2A сервера.** FastMCP і A2A виконують синхронні tools у фонових потоках (не в головному) — перше "ліниве" завантаження `SentenceTransformer`/`CrossEncoder` в такому потоці спричиняло **segmentation fault** на macOS (Apple Silicon), не просто зависання. Прогрів моделі синхронно, в головному потоці, до старту async-сервера, усуває проблему повністю.
+- **`threading.Lock()` / `asyncio.Lock()` для лінивої ініціалізації** — і `Retriever` (у `tools.py`), і кожен `LangChainAgentExecutor` (в `a2a_servers.py`) використовують подвійну перевірку (double-checked locking), щоб паралельні запити не створювали кілька копій важких моделей одночасно.
+- **`read_url` через `requests`, не `trafilatura.fetch_url`** — вбудований таймаут `trafilatura` побудований на `signal`, який не працює поза головним потоком.
+- **`main.py` повністю асинхронний** (`asyncio.run(main())`, `await supervisor.ainvoke(...)`) — Supervisor використовує `delegate_to_*` tools, які самі `async def` (роблять мережеві A2A-виклики), тож `create_agent` реєструє їх лише як async-tools; синхронний `.invoke()` впаде з `NotImplementedError: StructuredTool does not support sync invocation`.
+- **`edit` у HITL реалізовано через `reject` + повідомлення**, не через `respond` (успадковано з lesson-8 — `respond` підміняє результат tool замість повторного виклику).
 
 ## Обмеження
 
-- **`reject` завжди веде до повторної спроби**, а не до справжнього скасування — `SUPERVISOR_SYSTEM_PROMPT` трактує будь-яке відхилення як "доопрацюй і спробуй знову". Немає жорсткого способу сказати "остаточно відмінити" без виходу з програми.
-- Цикл затвердження (`approve`/`edit`/`reject`) після `critique` APPROVE **не обмежений** кількістю спроб (на відміну від `research`↔`critique`, обмеженого `MAX_REVISION_ROUNDS`) — теоретично можна відхиляти нескінченно.
-- Безкоштовна квота Gemini (навіть на `flash-lite`) обмежена — активне тестування мультиагентного циклу може вичерпати денний ліміт.
-- `knowledge_search` покриває лише 3 документи (RAG, LangChain, LLM) — на інші теми `Planner`/`Researcher` покладаються виключно на `web_search`.
+- Успадковано з lesson-8: `reject` завжди веде до повторної спроби, немає справжнього скасування; цикл затвердження не обмежений кількістю раундів.
+- Всі 6 серверів мають запускатись у правильному порядку і залишатись живими одночасно — немає єдиного health-check чи orchestration-скрипта; якщо один сервер впав, наступний виклик до нього просто зависне/впаде з таймаутом.
+- `httpx.AsyncClient(timeout=180)` — фіксований, доволі великий таймаут для A2A-делегування; на повільнішій мережі чи важчому запиті цього може не вистачити.
+- Безкоштовна квота Gemini (`gemini-3.5-flash-lite`) — мультиагентна система через MCP+A2A робить ще більше LLM-викликів на запит, ніж lesson-8 (кожен A2A-виклик — окремий процес з окремим `create_agent`).
 
-## Тестування циклу REVISE
+## Тестування циклу REVISE (успадковано з lesson-8)
 
-Логіка REVISE (Critic → gaps → Researcher повторно з revision_requests) реалізована в `SUPERVISOR_SYSTEM_PROMPT` і перевірена ізольовано: прямий виклик `Critic Agent` на навмисно неповному дослідженні коректно повернув `verdict="REVISE"` з конкретними `gaps`/`revision_requests` (див. розробницький лог). У живих прогонах через повний `Supervisor` (кілька спроб з різними темами) Critic послідовно давав `APPROVE` з першої спроби — Research Agent виявився достатньо ретельним, щоб не тригерити REVISE органічно в рамках доступного тестового бюджету (безкоштовна квота Gemini). Механізм REVISE присутній у коді й системному промпті, готовий спрацювати, коли Critic дійсно виявить прогалини.
+REVISE-логіка перевірена ізольовано: прямий A2A-виклик до Critic Agent на навмисно неповному дослідженні коректно повертає `verdict="REVISE"` з конкретними `gaps`. У **чотирьох** живих прогонах через повний конвеєр (три через MCP+A2A у lesson-10, один через прямі виклики в lesson-8) Critic послідовно давав `APPROVE` з першої спроби — Planner формує достатньо конкретний план, а Researcher достатньо ретельно його виконує, щоб не залишати прогалин, які Critic вважає значущими. Механізм REVISE (Supervisor → Researcher з `revision_requests`, до `MAX_REVISION_ROUNDS` разів) присутній у коді й системному промпті, готовий спрацювати, коли Critic дійсно виявить недоліки.

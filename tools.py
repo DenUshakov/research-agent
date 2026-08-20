@@ -12,7 +12,10 @@ from retriever import Retriever
 _retriever = None
 _retriever_lock = threading.Lock()
 
-
+def preload_retriever() -> None:
+    """Синхронно ініціалізує Retriever у поточному (головному) потоці — викликати перед стартом сервера."""
+    _get_retriever()
+    
 def _get_retriever() -> Retriever:
     global _retriever
     if _retriever is None:

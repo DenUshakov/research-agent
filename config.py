@@ -21,8 +21,16 @@ class Settings(BaseSettings):
     rrf_k: int = 60
     candidate_pool_multiplier: int = 4
     web_search_snippet_limit: int = 300
-# Multi-agent (lesson-8)
+    
+    # Multi-agent (lesson-8)
     max_revision_rounds: int = 2
+
+     # MCP / A2A (lesson-10)
+    search_mcp_url: str = "http://127.0.0.1:8901/mcp"
+    report_mcp_url: str = "http://127.0.0.1:8902/mcp"
+    planner_a2a_port: int = 8903
+    researcher_a2a_port: int = 8904
+    critic_a2a_port: int = 8905
 
 settings = Settings()
 PLANNER_SYSTEM_PROMPT = """Ти — Planner Agent у мультиагентній дослідницькій системі. Твоя задача — декомпозувати запит користувача у структурований план дослідження.

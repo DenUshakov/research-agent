@@ -1,52 +1,86 @@
-Research Agent (власний ReAct loop, з RAG). Введи питання (або 'exit' для виходу).
+Multi-Agent Research System (MCP + A2A). Введи запит (або 'exit' для виходу).
 
-You: Що таке RAG і як він доповнює LLM?
+You: What is RAG? Write a short report.
 
-🔧 Tool call: knowledge_search({'query': 'що таке RAG як він доповнює LLM Retrieval-Augmented Generation'})
-📎 Result: [retrieval-augmented-generation.pdf, стор. 1]
-Retrieval-augmented generation
-Retrieval-augmented generation (RAG) is a technique that enables large language models (LLMs) to
-retrieve and incorporate n...
+Key 'additionalProperties' is not supported in schema, ignoring
 
-🔧 Tool call: knowledge_search({'query': 'RAG vs fine-tuning advantages components vector database embeddings'})
-📎 Result: [retrieval-augmented-generation.pdf, стор. 2]
-embeddings, numerical representations in the form of a large
-vector space. RAG can be used on unstructured (usually text),
-semi-structured, or structured ...
+[Supervisor --A2A--> Planner]
+🔧 delegate_to_planner('What is RAG? Write a short report.')
+  📎 {"goal": "Explain what Retrieval-Augmented Generation (RAG) is, covering definition,
+     architecture, and benefits", "search_queries": ["Retrieval-augmented generation
+     definition architecture", "RAG vector database embeddings", "benefits of RAG over
+     standard LLM training"], "sources_to_check": ["knowledge_base", "web"],
+     "output_format": "short report with definition, workflow, and benefits"}
 
-🔧 Tool call: web_search({'query': 'RAG vs Fine-tuning comparison advantages benefits'})
-📎 Result: [{"title": "RAG vs. Fine-tuning | IBM", "url": "https://www.ibm.com/think/topics/rag-vs-fine-tuning", ...}]
+Key 'additionalProperties' is not supported in schema, ignoring
 
-🔧 Tool call: read_url({'url': 'https://www.ibm.com/think/topics/rag-vs-fine-tuning'})
-📎 Result: Retrieval augmented generation (RAG) and fine-tuning are two methods enterprises can use to get more value out of large language models (LLMs)...
+[Supervisor --A2A--> Researcher]
+🔧 delegate_to_researcher('Search and gather information about RAG based on the plan...')
+  📎 Findings (4888 chars)
 
-🔧 Tool call: write_report({'filename': 'rag_overview_and_llm_integration.md', 'content': '<...повний звіт, див. example_output/report.md...>'})
-📎 Result: Звіт успішно збережено: /Users/garrynafig/research-agent/output/rag_overview_and_llm_integration.md
+Key 'additionalProperties' is not supported in schema, ignoring
 
-Agent: Звіт про Retrieval-Augmented Generation (RAG) та його роль у доповненні великих мовних
-моделей успішно сформовано та збережено у файл rag_overview_and_llm_integration.md.
-[...коротке резюме: визначення RAG, як він доповнює LLM, етапи роботи, RAG vs Fine-Tuning...]
+[Supervisor --A2A--> Critic]
+🔧 delegate_to_critic(...)
+  📎 {"verdict": "APPROVE", "is_fresh": true, "is_complete": true, "is_well_structured": true,
+     "strengths": ["Covers core components of RAG architecture and vector databases
+     accurately", "Detailed breakdown of retrieval and generation stages"],
+     "gaps": [], "revision_requests": []}
 
-Примітка: агент самостійно обрав knowledge_search як перший інструмент (тема входить до
-локальної бази знань — retrieval-augmented-generation.pdf), і лише для аспекту порівняння
-з Fine-Tuning (тема поза базою знань) переключився на web_search + read_url. Це підтверджує
-коректну роботу стратегії вибору джерела, закладеної в system prompt.
+Key 'additionalProperties' is not supported in schema, ignoring
 
+============================================================
+⏸️  ACTION REQUIRES APPROVAL
+============================================================
+  Tool:  save_report_tool
+  File:  what_is_rag_report.md
+  Preview:
+# Що таке RAG (Retrieval-Augmented Generation)?
+**Retrieval-Augmented Generation (RAG)** — це архітектурний підхід у галузі штучного
+інтелекту, що поєднує можливості пошуку релевантної інформації в зовнішніх джерелах
+із генерацією тексту за допомогою Великих мовних моделей (LLM). Цей метод створений
+для того, щоб подолати обмеження стандартних LLM, які спираються виключно на
+статистичні дані, закладені під час навчання.
 ---
+## 1. Як працює RAG?
+Архітектура RAG зазвичай складається з таких кл...
 
-Другий тест — питання ПОЗА темами локальної бази знань:
+👉 approve / edit / reject: approve
 
-You: Яка найкраща порода собак для квартири?
+Key 'additionalProperties' is not supported in schema, ignoring
+✅ Agent: Короткий звіт на тему «Що таке RAG (Retrieval-Augmented Generation)?» успішно
+підготовлено, перевірено Critic Agent та збережено у файл output/what_is_rag_report.md.
 
-🔧 Tool call: web_search({'query': 'найкращі породи собак для квартири'})
-📎 Result: [...]
+You: exit
 
-🔧 Tool call: web_search({'query': 'best apartment dogs American Kennel Club AKC'})
-📎 Result: [...]
+--- Незалежна перевірка: файл реально збережено на диску ---
+$ ls -la output/what_is_rag_report.md
+-rw-r--r--@ 1 garrynafig  staff  4406 Aug 20 17:00 output/what_is_rag_report.md
 
-🔧 Tool call: read_url({'url': 'https://www.akc.org/expert-advice/lifestyle/best-dogs-for-apartments/'})
-📎 Result: [...]
+--- Незалежна перевірка: два інших тести HITL (окремі сесії) ---
 
-Примітка: knowledge_search ЖОДНОГО РАЗУ не викликаний — агент коректно розпізнав, що тема
-не стосується локальної бази знань (RAG/LangChain/LLM), і одразу пішов у web_search,
-як і очікувалось за описом tool та стратегією в system prompt.
+Тест REJECT (справжнє скасування, не повторна спроба):
+You: What is RAG?
+[... Planner -> Researcher -> Critic, verdict APPROVE ...]
+⏸️  ACTION REQUIRES APPROVAL
+  Tool: save_report_tool
+  File: rag_explanation_report.md
+👉 approve / edit / reject: reject
+Причина відхилення (Enter — без причини): Not needed anymore
+✅ Agent: Збереження звіту було скасовано користувачем із причиною: "Not needed anymore".
+Якщо вам потрібна будь-яка інша інформація чи модифікація матеріалу про RAG, дайте знати!
+$ ls output/rag_explanation_report.md
+ls: output/rag_explanation_report.md: No such file or directory
+(підтверджено: reject не створив файл — на відміну від старої поведінки lesson-8,
+де reject завжди призводив до повторної спроби збереження)
+
+Тест жорсткого revision limit (ізольовано, MAX_REVISION_ROUNDS=0):
+>>> await delegate_to_critic('Original request: Explain RAG in full detail.\n\nFindings: RAG is a technique.')
+[Supervisor --A2A--> Critic]
+🔧 delegate_to_critic(...)
+  📎 {"verdict": "REVISE", "is_complete": false, ...}
+  ⚠️ Ліміт REVISE-раундів (0) вичерпано — примусовий APPROVE.
+FULL RESULT: {"verdict": "APPROVE", ..., "strengths": [..., "Форсоване затвердження
+після 0 раундів доопрацювання (ліміт вичерпано)."], "gaps": [], "revision_requests": []}
+(підтверджено: Critic реально повернув REVISE, але код примусово підмінив вердикт —
+ліміт застосовується незалежно від рішення LLM)

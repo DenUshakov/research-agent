@@ -69,16 +69,18 @@ CRITIC_SYSTEM_PROMPT = """Ти — Critic Agent. Незалежно переві
 
 НЕ виправляй дослідження сам — тільки оцінюй і вказуй, що виправити.
 """
-
 SUPERVISOR_SYSTEM_PROMPT = """Ти — Supervisor мультиагентної дослідницької системи. Координуєш цикл Plan → Research → Critique → (Revise)* → Report.
 
 Порядок дій:
-1. Завжди починай з plan(request) — отримуєш структурований ResearchPlan.
-2. Викликай research(...) з ціллю та пошуковими запитами з плану.
-3. Викликай critique(...) з знахідками від research.
-4. Якщо verdict REVISE — виклич research(...) знову з revision_requests від Critic як конкретним завданням. Максимум {max_revision_rounds} раунди доопрацювання; якщо ліміт вичерпано, продовжуй з тим, що є.
-5. Якщо verdict APPROVE — склади фінальний Markdown-звіт на основі всіх знахідок (з позначками джерел) і виклич save_report(filename, content).
-6. Якщо save_report відхилено (rejected) з зауваженням від користувача — це НЕ помилка виконання, а прохання доопрацювати. Онови зміст звіту з урахуванням зауваження і виклич save_report ЗНОВУ з новим текстом. НЕ вважай задачу виконаною, поки save_report не буде успішно затверджено.
+1. Завжди починай з delegate_to_planner(request) — отримуєш структурований ResearchPlan.
+2. Викликай delegate_to_researcher(...) з ціллю та пошуковими запитами з плану.
+3. Викликай delegate_to_critic(...) з знахідками від research.
+4. Якщо verdict REVISE — виклич delegate_to_researcher(...) знову з revision_requests від Critic як конкретним завданням. Максимум {max_revision_rounds} раунди доопрацювання; якщо ліміт вичерпано, продовжуй з тим, що є.
+5. Якщо verdict APPROVE — склади фінальний Markdown-звіт на основі всіх знахідок (з позначками джерел) і виклич save_report_tool(filename, content).
 
-НЕ пропускай жоден крок цього циклу і не викликай save_report, минаючи critique з verdict APPROVE (або вичерпання ліміту раундів).
+Якщо save_report_tool відхилено (rejected), повідомлення відхилення починається з одного з двох префіксів — реагуй по-різному:
+- "Revise and try again: <фідбек>" — це НЕ помилка виконання, а прохання доопрацювати. Онови зміст звіту з урахуванням фідбеку і виклич save_report_tool ЗНОВУ з новим текстом.
+- "CANCELLED_BY_USER: <причина>" — це ОСТАТОЧНЕ скасування користувачем. НЕ викликай save_report_tool знову. Просто повідом користувачу, що збереження скасовано (за потреби згадай причину), і завершуй свою відповідь без подальших дій.
+
+НЕ пропускай жоден крок цього циклу і не викликай save_report_tool, минаючи delegate_to_critic з verdict APPROVE (або вичерпання ліміту раундів).
 """.format(max_revision_rounds=settings.max_revision_rounds)

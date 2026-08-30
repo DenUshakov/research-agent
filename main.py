@@ -2,7 +2,7 @@ import asyncio
 
 from langgraph.types import Command
 
-from supervisor import build_supervisor
+from supervisor import build_supervisor, reset_revision_counter
 
 
 def extract_text(content) -> str:
@@ -40,6 +40,7 @@ async def main():
         if not user_input:
             continue
 
+        reset_revision_counter()
         result = await supervisor.ainvoke(
             {"messages": [{"role": "user", "content": user_input}]},
             config=config,
@@ -58,7 +59,7 @@ async def main():
                 resume = {"decisions": [{"type": "reject", "message": f"Revise and try again: {feedback}"}]}
             elif decision == "reject":
                 reason = (await asyncio.to_thread(input, "Причина відхилення (Enter — без причини): ")).strip()
-                resume = {"decisions": [{"type": "reject", "message": reason or "Rejected by user"}]}
+                resume = {"decisions": [{"type": "reject", "message": f"CANCELLED_BY_USER: {reason or 'no reason given'}"}]}
             else:
                 print("Невідома команда, спробуй ще раз.")
                 continue

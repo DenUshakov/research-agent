@@ -51,7 +51,28 @@ async def delegate_to_critic(findings: str) -> str:
     url = f"http://127.0.0.1:{settings.critic_a2a_port}"
     result = await _delegate(url, findings)
     print(f"  📎 {result[:200]}...")
+
+    data = json.loads(result)
+    if data["verdict"] == "REVISE":
+        _revision_state["count"] += 1
+        if _revision_state["count"] > settings.max_revision_rounds:
+            print(f"  ⚠️ Ліміт REVISE-раундів ({settings.max_revision_rounds}) вичерпано — примусовий APPROVE.")
+            data["verdict"] = "APPROVE"
+            data["gaps"] = []
+            data["revision_requests"] = []
+            data["strengths"] = data.get("strengths", []) + [
+                f"Форсоване затвердження після {settings.max_revision_rounds} раундів доопрацювання (ліміт вичерпано)."
+            ]
+            result = json.dumps(data, ensure_ascii=False)
+
     return result
+
+_revision_state = {"count": 0}
+
+
+def reset_revision_counter() -> None:
+    """Скидає лічильник раундів REVISE — викликати перед КОЖНИМ новим запитом користувача (не при resume після HITL)."""
+    _revision_state["count"] = 0
 
 async def _get_search_mcp_tools():
     client = MultiServerMCPClient(

@@ -1,0 +1,189 @@
+import os
+import threading
+import requests
+
+
+from ddgs import DDGS
+import trafilatura
+
+from config import settings
+from retriever import Retriever
+
+_retriever = None
+_retriever_lock = threading.Lock()
+
+
+def _get_retriever() -> Retriever:
+    global _retriever
+    if _retriever is None:
+        with _retriever_lock:
+            if _retriever is None:
+                _retriever = Retriever()
+    return _retriever
+
+
+
+def web_search(query: str) -> list[dict]:
+    """Шукає інформацію в інтернеті через DuckDuckGo."""
+    try:
+        raw_results = DDGS().text(query, max_results=5)
+    except Exception as e:
+        return [{"error": f"Помилка пошуку: {e}"}]
+
+    snippet_limit = settings.web_search_snippet_limit
+    results = []
+    for r in raw_results:
+        snippet = r.get("body", "")
+        if len(snippet) > snippet_limit:
+            snippet = snippet[:snippet_limit] + "..."
+        results.append({
+            "title": r.get("title", ""),
+            "url": r.get("href", ""),
+            "snippet": snippet,
+        })
+    return results
+
+def read_url(url: str) -> str:
+    """Завантажує сторінку за URL і повертає її основний текст."""
+    try:
+        response = requests.get(
+            url,
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchAgent/1.0)"},
+        )
+        response.raise_for_status()
+    except requests.exceptions.Timeout:
+        return f"Помилка: таймаут при завантаженні {url} (сервер не відповів за 10 секунд)."
+    except requests.exceptions.RequestException as e:
+        return f"Помилка завантаження сторінки: {e}"
+
+    text = trafilatura.extract(response.text)
+    if not text:
+        return f"Сторінку {url} завантажено, але не вдалося витягти текстовий вміст."
+
+    limit = settings.max_tool_result_chars
+    if len(text) > limit:
+        text = text[:limit] + f"\n\n[...обрізано, повний текст був {len(text)} символів...]"
+    return text
+
+
+def write_report(filename: str, content: str) -> str:
+    """Зберігає фінальний Markdown-звіт у файл у директорії output/."""
+    safe_name = os.path.basename(filename)
+    if not safe_name.endswith(".md"):
+        safe_name += ".md"
+
+    output_dir = settings.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+
+    path = os.path.join(output_dir, safe_name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    return f"Звіт успішно збережено: {os.path.abspath(path)}"
+
+_retriever = None
+
+def save_report(filename: str, content: str) -> str:
+    """Зберігає фінальний Markdown-звіт у файл у директорії output/. Захищена дія — потребує підтвердження користувача."""
+    return write_report(filename, content)
+
+def knowledge_search(query: str) -> str:
+    """Шукає інформацію в локальній базі знань (проіндексовані PDF документи)."""
+    try:
+        retriever = _get_retriever()
+    except FileNotFoundError as e:
+        return f"Помилка: {e}"
+
+    try:
+        results = retriever.search(query)
+    except Exception as e:
+        return f"Помилка пошуку в базі знань: {e}"
+
+    if not results:
+        return "У базі знань не знайдено релевантної інформації за цим запитом."
+
+    formatted = []
+    for r in results:
+        formatted.append(f"[{r['source']}, стор. {r['page']}]\n{r['text']}")
+    return "\n\n---\n\n".join(formatted)
+
+
+# --- JSON Schema декларації для tool calling API ---
+
+TOOL_DECLARATIONS = [
+    {
+        "type": "function",
+        "name": "web_search",
+        "description": (
+            "Шукає інформацію в інтернеті через DuckDuckGo. Повертає короткі сніпети "
+            "(title, url, snippet) — цього достатньо, щоб зрозуміти релевантність джерела, "
+            "але не для глибокого аналізу. Для повного тексту сторінки використовуй read_url."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Пошуковий запит"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "read_url",
+        "description": (
+            "Завантажує сторінку за URL і повертає її основний текст (без меню, реклами, "
+            "футерів). Використовуй, коли web_search знайшов релевантну сторінку і потрібні "
+            "деталі, яких немає в сніпеті."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Повна URL-адреса сторінки"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "write_report",
+        "description": (
+            "Зберігає фінальний Markdown-звіт у файл. Викликай лише після того, як зібрав "
+            "достатньо інформації і сформував повний текст звіту."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Назва файлу, напр. 'report.md'"},
+                "content": {"type": "string", "description": "Повний текст звіту у Markdown"},
+            },
+            "required": ["filename", "content"],
+        },
+    },
+    {
+    "type": "function",
+    "name": "knowledge_search",
+    "description": (
+        "Шукає інформацію в локальній базі знань — проіндексованих документах "
+        "(наразі: про RAG, LangChain, великі мовні моделі). Використовуй ЗАВЖДИ, коли "
+        "питання користувача стосується цих тем, ДО того як звертатись до web_search — "
+        "локальна база містить перевірені, вже опрацьовані джерела."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Пошуковий запит"},
+        },
+        "required": ["query"],
+    },
+},
+]
+
+
+
+TOOL_FUNCTIONS = {
+    "web_search": web_search,
+    "read_url": read_url,
+    "write_report": write_report,
+    "knowledge_search": knowledge_search,
+}
